@@ -63,6 +63,7 @@ export default function App() {
   const [syncing, setSyncing] = useState(false);
   const [showRecovery, setShowRecovery] = useState(false);
 
+  // Navigation
   const [view, setView] = useState('dashboard'); 
   const [activeTab, setActiveTab] = useState('flashcards'); 
   const [activeSetId, setActiveSetId] = useState(null);
@@ -83,40 +84,42 @@ export default function App() {
     setPersistence(auth, browserLocalPersistence);
     const unsubscribe = onAuthStateChanged(auth, (u) => {
       setUser(u);
-      if (!u) setStatus('ready');
+      if (!u) {
+        setStatus('ready');
+        setView('dashboard');
+      }
     });
     return () => unsubscribe();
   }, []);
 
-  // 2. Data & Profile Listeners
+  // 2. Data Listeners
   useEffect(() => {
     if (!user) return;
 
-    // User Profile Listener
+    // Profile
     const profileRef = doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'info');
     const unsubscribeProfile = onSnapshot(profileRef, (docSnap) => {
       if (docSnap.exists()) {
         const data = docSnap.data();
         setProfile(data);
-        // Only initialize editName if it's the first time
-        setEditName(prev => prev === '' ? data.displayName : prev);
-      } else {
-        // Fallback for brand new users
-        setEditName('Student');
+        setEditName(prev => (prev === '' ? data.displayName : prev));
       }
       setStatus('ready');
     });
 
+    // Sets
     const setsPath = collection(db, 'artifacts', appId, 'users', user.uid, 'studySets');
     const unsubscribeSets = onSnapshot(setsPath, (snapshot) => {
       setSets(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
     });
 
+    // Recovery
     const oldPath = collection(db, 'studySets');
     const unsubscribeOld = onSnapshot(oldPath, (snapshot) => {
       setOldSets(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
     });
 
+    // History
     const historyPath = collection(db, 'artifacts', appId, 'users', user.uid, 'quizHistory');
     const unsubscribeHistory = onSnapshot(historyPath, (snapshot) => {
       setHistory(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a, b) => b.timestamp - a.timestamp));
@@ -129,6 +132,18 @@ export default function App() {
       unsubscribeHistory(); 
     };
   }, [user]);
+
+  // Derived Active Set (Crucial Fix: Ensure it reacts to sets updating)
+  const activeSet = useMemo(() => {
+    return sets.find(s => s.id === activeSetId) || null;
+  }, [sets, activeSetId]);
+
+  const filteredSets = useMemo(() => {
+    return sets.filter(s => 
+      s.type === activeTab && 
+      (s.title || '').toLowerCase().includes(searchQuery.toLowerCase())
+    );
+  }, [sets, activeTab, searchQuery]);
 
   const stats = useMemo(() => {
     const flashcardCount = sets.filter(s => s.type === 'flashcards').length;
@@ -167,12 +182,11 @@ export default function App() {
     setSyncing(true);
     try {
       const profileRef = doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'info');
-      // Using setDoc with merge: true is safer than updateDoc for initial writes
       await setDoc(profileRef, { displayName: editName }, { merge: true });
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 2000);
     } catch (err) {
-      console.error("Profile Update Error:", err);
+      console.error(err);
     } finally {
       setSyncing(false);
     }
@@ -191,7 +205,6 @@ export default function App() {
   };
 
   const moveItem = (index, direction) => {
-    const activeSet = sets.find(s => s.id === activeSetId);
     if (!activeSet?.items) return;
     const newItems = [...activeSet.items];
     const targetIndex = index + direction;
@@ -235,8 +248,8 @@ export default function App() {
   });
 
   const handleImport = () => {
+    if (!activeSet) return;
     const newItems = [];
-    const activeSet = sets.find(s => s.id === activeSetId);
     if (activeTab === 'flashcards') {
       const regex = /Front:\s*(.*?)\s*Back:\s*(.*)/gi;
       let m; while ((m = regex.exec(importText)) !== null) {
@@ -263,7 +276,6 @@ export default function App() {
   };
 
   const startQuiz = (onlyMissed = false) => {
-    const activeSet = sets.find(s => s.id === activeSetId);
     if (!activeSet?.items || activeSet.items.length === 0) return;
     let items = onlyMissed ? activeSet.items.filter(it => quizResults.missedIds.includes(it.id)) : activeSet.items;
     setQuizQuestions([...items].sort(() => 0.5 - Math.random()));
@@ -275,7 +287,7 @@ export default function App() {
   };
 
   const finishQuiz = async () => {
-    const activeSet = sets.find(s => s.id === activeSetId);
+    if (!activeSet) return;
     let score = 0; const missed = [], missedIds = [];
     quizQuestions.forEach(q => {
       if (quizAnswers[q.id] === q.correctAnswer) score++;
@@ -293,7 +305,7 @@ export default function App() {
 
   // LOGIN SCREEN
   if (!user) return (
-    <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-6">
+    <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-6 pb-20">
       <div className="w-full max-w-md bg-white p-10 rounded-[4rem] border border-slate-200 shadow-2xl animate-in zoom-in-95 duration-300">
         <div className="flex justify-center mb-8">
            <div className="bg-indigo-600 p-4 rounded-3xl text-white shadow-xl shadow-indigo-100"><BrainCircuit size={40} /></div>
@@ -330,20 +342,25 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans pb-24">
+      {/* Header */}
       <nav className="bg-white/80 backdrop-blur-md border-b border-slate-200 sticky top-0 z-50 px-6 h-20 flex items-center justify-between">
         <div className="flex items-center gap-3 cursor-pointer" onClick={() => setView('dashboard')}>
           <div className="bg-indigo-600 p-2 rounded-xl text-white shadow-lg"><BrainCircuit size={22} /></div>
           <span className="font-black text-2xl tracking-tighter">LEARNLY</span>
         </div>
-        <div 
-          onClick={() => setView('profile')}
-          className="w-10 h-10 rounded-full bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 cursor-pointer hover:bg-indigo-600 hover:text-white transition-all overflow-hidden"
-        >
-          <User size={20} />
+        <div className="flex items-center gap-2">
+           {syncing && <RefreshCw size={16} className="animate-spin text-indigo-500 mr-2" />}
+           <div 
+             onClick={() => setView('profile')}
+             className="w-10 h-10 rounded-full bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 cursor-pointer hover:bg-indigo-600 hover:text-white transition-all overflow-hidden"
+           >
+             <User size={20} />
+           </div>
         </div>
       </nav>
 
       <main className="max-w-4xl mx-auto px-6 py-8">
+        {/* DASHBOARD */}
         {view === 'dashboard' && (
           <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
             <header className="mb-12">
@@ -385,6 +402,7 @@ export default function App() {
           </div>
         )}
 
+        {/* PROFILE */}
         {view === 'profile' && (
           <div className="max-w-xl mx-auto animate-in zoom-in-95 duration-300">
              <button onClick={() => setView('dashboard')} className="mb-8 text-slate-400 font-black text-[10px] uppercase flex items-center gap-2"><ChevronLeft size={16}/> Back</button>
@@ -419,24 +437,59 @@ export default function App() {
           </div>
         )}
 
+        {/* LIBRARY */}
         {view === 'library' && (
           <div className="animate-in fade-in duration-500">
             <header className="flex justify-between items-center mb-8">
                <button onClick={() => setView('dashboard')} className="text-slate-400 font-black text-[10px] uppercase flex items-center gap-2"><ChevronLeft size={16}/> Home</button>
                <button onClick={() => createSet(activeTab)} className="bg-indigo-600 text-white px-6 py-2.5 rounded-2xl text-[10px] font-black uppercase tracking-widest shadow-lg">+ Add {activeTab === 'flashcards' ? 'Deck' : 'Exam'}</button>
             </header>
+
+            {oldSets.length > 0 && !showRecovery && (
+              <div className="bg-amber-50 border border-amber-200 p-6 rounded-[2rem] mb-8 flex items-center justify-between shadow-sm animate-in slide-in-from-top-4">
+                 <div className="flex items-center gap-4">
+                    <div className="text-amber-500"><AlertTriangle size={24}/></div>
+                    <p className="text-amber-800 text-[11px] font-black uppercase tracking-widest">Found legacy content. Migrate?</p>
+                 </div>
+                 <button onClick={() => setShowRecovery(true)} className="bg-amber-500 text-white px-5 py-2 rounded-xl text-[9px] font-black uppercase">View</button>
+              </div>
+            )}
+
+            {showRecovery && (
+               <div className="bg-slate-900 text-white p-8 rounded-[3rem] mb-10 animate-in zoom-in-95">
+                  <div className="flex justify-between items-center mb-6"><h3 className="font-black">Migration</h3><button onClick={() => setShowRecovery(false)}><X/></button></div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                     {oldSets.map(os => (
+                        <div key={os.id} className="bg-slate-800 p-4 rounded-2xl flex justify-between items-center">
+                           <div><div className="font-bold text-sm">{os.title}</div><div className="text-[9px] text-slate-500 uppercase">{os.items?.length || 0} items</div></div>
+                           <button onClick={() => migrateSet(os)} className="bg-indigo-600 p-2 rounded-xl"><Check size={16}/></button>
+                        </div>
+                     ))}
+                  </div>
+               </div>
+            )}
+
             <h2 className="text-3xl font-black text-slate-800 mb-8 tracking-tight">{activeTab === 'flashcards' ? 'Flashcards' : 'Exams'}</h2>
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {filteredSets.map(set => (
-                <div key={set.id} className="bg-white p-6 rounded-[2.5rem] border border-slate-200 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all cursor-pointer group" onClick={() => { setActiveSetId(set.id); setView(activeTab === 'flashcards' ? 'study' : 'quiz-ready'); setCurrentCardIndex(0); }}>
-                  <div className="flex justify-between items-start mb-2"><h3 className="text-xl font-black group-hover:text-indigo-600 leading-tight">{set.title}</h3><button onClick={(e) => { e.stopPropagation(); deleteSet(set.id); }} className="text-slate-100 hover:text-red-500 transition-colors"><Trash2 size={18}/></button></div>
-                  <div className="mt-8 flex gap-3"><button className="flex-1 bg-indigo-50 text-indigo-600 py-4 rounded-[1.25rem] text-[10px] font-black uppercase tracking-widest group-hover:bg-indigo-600 group-hover:text-white transition-all">Open Session</button></div>
+              {filteredSets.length === 0 ? (
+                <div className="col-span-full py-20 bg-white rounded-[3.5rem] border-2 border-dashed border-slate-200 text-center flex flex-col items-center">
+                   <div className="bg-slate-50 p-6 rounded-full mb-4 text-slate-200"><Plus size={48}/></div>
+                   <p className="text-slate-400 font-bold uppercase text-[10px] tracking-widest">Nothing here yet</p>
                 </div>
-              ))}
+              ) : (
+                filteredSets.map(set => (
+                  <div key={set.id} className="bg-white p-6 rounded-[2.5rem] border border-slate-200 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all cursor-pointer group" onClick={() => { setActiveSetId(set.id); setView(activeTab === 'flashcards' ? 'study' : 'quiz-ready'); setCurrentCardIndex(0); setIsFlipped(false); }}>
+                    <div className="flex justify-between items-start mb-2"><h3 className="text-xl font-black group-hover:text-indigo-600 leading-tight">{set.title}</h3><button onClick={(e) => { e.stopPropagation(); deleteSet(set.id); }} className="text-slate-100 hover:text-red-500 transition-colors"><Trash2 size={18}/></button></div>
+                    <div className="mt-8 flex gap-3"><button className="flex-1 bg-indigo-50 text-indigo-600 py-4 rounded-[1.25rem] text-[10px] font-black uppercase tracking-widest group-hover:bg-indigo-600 group-hover:text-white transition-all">Launch</button></div>
+                  </div>
+                ))
+              )}
             </div>
           </div>
         )}
 
+        {/* EDITOR */}
         {view === 'edit' && activeSet && (
           <div className="animate-in fade-in duration-300 pb-20">
             <div className="flex justify-between items-center mb-8 sticky top-16 bg-slate-50/90 py-4 z-40 border-b border-slate-200">
@@ -482,6 +535,7 @@ export default function App() {
           </div>
         )}
 
+        {/* STUDY */}
         {view === 'study' && activeSet && (
           <div className="max-w-2xl mx-auto text-center animate-in zoom-in-95 duration-300">
             <div className="flex justify-between items-center mb-8"><button onClick={() => setView('library')} className="text-slate-400 font-black text-[10px] uppercase flex items-center gap-2 hover:text-indigo-600"><ChevronLeft size={16}/> Back</button><button onClick={() => setView('edit')} className="bg-indigo-600 text-white px-6 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg active:scale-95 transition-all">Edit Deck</button></div>
@@ -497,6 +551,7 @@ export default function App() {
           </div>
         )}
 
+        {/* QUIZ READY */}
         {view === 'quiz-ready' && activeSet && (
           <div className="max-w-xl mx-auto text-center animate-in zoom-in-95 duration-300">
              <div className="bg-white p-16 rounded-[4.5rem] border border-slate-200 shadow-2xl mb-10">
@@ -512,6 +567,7 @@ export default function App() {
           </div>
         )}
 
+        {/* QUIZ */}
         {view === 'quiz' && activeSet && (
           <div className="animate-in fade-in duration-300 space-y-10 pb-20">
             {!quizResults ? (
