@@ -52,10 +52,9 @@ export default function App() {
   const [authMode, setAuthMode] = useState('login'); 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-
-  // Local state for name editing to prevent "Student" reset bug
   const [editName, setEditName] = useState('');
   const [authError, setAuthError] = useState('');
+  const [saveSuccess, setSaveSuccess] = useState(false);
 
   const [sets, setSets] = useState([]);
   const [oldSets, setOldSets] = useState([]); 
@@ -64,7 +63,6 @@ export default function App() {
   const [syncing, setSyncing] = useState(false);
   const [showRecovery, setShowRecovery] = useState(false);
 
-  // Navigation
   const [view, setView] = useState('dashboard'); 
   const [activeTab, setActiveTab] = useState('flashcards'); 
   const [activeSetId, setActiveSetId] = useState(null);
@@ -100,8 +98,11 @@ export default function App() {
       if (docSnap.exists()) {
         const data = docSnap.data();
         setProfile(data);
-        // We only initialize editName if it hasn't been touched yet
+        // Only initialize editName if it's the first time
         setEditName(prev => prev === '' ? data.displayName : prev);
+      } else {
+        // Fallback for brand new users
+        setEditName('Student');
       }
       setStatus('ready');
     });
@@ -129,7 +130,6 @@ export default function App() {
     };
   }, [user]);
 
-  // Derived Stats
   const stats = useMemo(() => {
     const flashcardCount = sets.filter(s => s.type === 'flashcards').length;
     const examCount = sets.filter(s => s.type === 'quizzes').length;
@@ -154,7 +154,7 @@ export default function App() {
           displayName: editName || 'Student',
           email: email,
           createdAt: Date.now()
-        });
+        }, { merge: true });
       }
       setView('dashboard');
     } catch (err) {
@@ -165,9 +165,17 @@ export default function App() {
   const handleUpdateProfile = async () => {
     if (!user || !editName) return;
     setSyncing(true);
-    const profileRef = doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'info');
-    await updateDoc(profileRef, { displayName: editName });
-    setSyncing(false);
+    try {
+      const profileRef = doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'info');
+      // Using setDoc with merge: true is safer than updateDoc for initial writes
+      await setDoc(profileRef, { displayName: editName }, { merge: true });
+      setSaveSuccess(true);
+      setTimeout(() => setSaveSuccess(false), 2000);
+    } catch (err) {
+      console.error("Profile Update Error:", err);
+    } finally {
+      setSyncing(false);
+    }
   };
 
   const handleLogout = () => {
@@ -322,7 +330,6 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans pb-24">
-      {/* Header */}
       <nav className="bg-white/80 backdrop-blur-md border-b border-slate-200 sticky top-0 z-50 px-6 h-20 flex items-center justify-between">
         <div className="flex items-center gap-3 cursor-pointer" onClick={() => setView('dashboard')}>
           <div className="bg-indigo-600 p-2 rounded-xl text-white shadow-lg"><BrainCircuit size={22} /></div>
@@ -337,7 +344,6 @@ export default function App() {
       </nav>
 
       <main className="max-w-4xl mx-auto px-6 py-8">
-        {/* DASHBOARD */}
         {view === 'dashboard' && (
           <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
             <header className="mb-12">
@@ -379,7 +385,6 @@ export default function App() {
           </div>
         )}
 
-        {/* PROFILE PAGE (Fixed Name Bug) */}
         {view === 'profile' && (
           <div className="max-w-xl mx-auto animate-in zoom-in-95 duration-300">
              <button onClick={() => setView('dashboard')} className="mb-8 text-slate-400 font-black text-[10px] uppercase flex items-center gap-2"><ChevronLeft size={16}/> Back</button>
@@ -394,17 +399,26 @@ export default function App() {
                    <input 
                      type="text" 
                      value={editName} 
-                     onChange={e => setEditName(e.target.value)}
-                     className="w-full bg-slate-50 border border-slate-100 p-4 rounded-2xl font-bold outline-none focus:ring-4 focus:ring-indigo-500/5 transition-all"
+                     onChange={e => {
+                       setEditName(e.target.value);
+                       if (saveSuccess) setSaveSuccess(false);
+                     }}
+                     className="w-full bg-slate-50 border border-slate-100 p-4 rounded-2xl font-bold outline-none focus:ring-4 focus:ring-indigo-500/5 transition-all mb-4"
+                     placeholder="Your Name"
                    />
-                   <button onClick={handleUpdateProfile} className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-lg">Update Profile</button>
+                   <button 
+                     onClick={handleUpdateProfile} 
+                     disabled={syncing}
+                     className={`w-full py-4 rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-lg transition-all flex items-center justify-center gap-2 ${saveSuccess ? 'bg-emerald-500 text-white' : 'bg-indigo-600 text-white hover:bg-indigo-700 active:scale-95'}`}
+                   >
+                     {syncing ? <RefreshCw className="animate-spin" size={14}/> : saveSuccess ? <><Check size={14}/> Saved</> : 'Update Profile'}
+                   </button>
                 </div>
              </div>
              <button onClick={handleLogout} className="w-full bg-rose-50 text-rose-500 py-6 rounded-[2.5rem] font-black uppercase text-[10px] tracking-widest flex items-center justify-center gap-3 border border-rose-100 hover:bg-rose-500 hover:text-white transition-all"><LogOut size={18}/> Log Out</button>
           </div>
         )}
 
-        {/* LIBRARY */}
         {view === 'library' && (
           <div className="animate-in fade-in duration-500">
             <header className="flex justify-between items-center mb-8">
@@ -423,7 +437,6 @@ export default function App() {
           </div>
         )}
 
-        {/* EDITOR (Big Buttons) */}
         {view === 'edit' && activeSet && (
           <div className="animate-in fade-in duration-300 pb-20">
             <div className="flex justify-between items-center mb-8 sticky top-16 bg-slate-50/90 py-4 z-40 border-b border-slate-200">
@@ -469,10 +482,9 @@ export default function App() {
           </div>
         )}
 
-        {/* Study, Quiz, Ready and Import follow... */}
         {view === 'study' && activeSet && (
           <div className="max-w-2xl mx-auto text-center animate-in zoom-in-95 duration-300">
-            <div className="flex justify-between items-center mb-8"><button onClick={() => setView('library')} className="text-slate-400 font-black text-[10px] uppercase flex items-center gap-2 hover:text-indigo-600"><ChevronLeft size={16}/> Library</button><button onClick={() => setView('edit')} className="bg-indigo-600 text-white px-6 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg active:scale-95 transition-all">Edit Deck</button></div>
+            <div className="flex justify-between items-center mb-8"><button onClick={() => setView('library')} className="text-slate-400 font-black text-[10px] uppercase flex items-center gap-2 hover:text-indigo-600"><ChevronLeft size={16}/> Back</button><button onClick={() => setView('edit')} className="bg-indigo-600 text-white px-6 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg active:scale-95 transition-all">Edit Deck</button></div>
             <h1 className="text-2xl font-black text-slate-800 mb-2">{activeSet.title}</h1>
             <div className="bg-indigo-50 text-indigo-600 inline-block px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest mb-10">{currentCardIndex + 1} / {activeSet.items?.length || 0}</div>
             <div className="aspect-[16/10] relative perspective-1000 cursor-pointer mb-12 select-none group" onClick={() => setIsFlipped(!isFlipped)}>
