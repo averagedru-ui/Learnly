@@ -17,7 +17,8 @@ import {
   updateDoc, 
   deleteDoc, 
   onSnapshot,
-  setDoc
+  setDoc,
+  writeBatch
 } from 'firebase/firestore';
 import { 
   Trash2, ChevronLeft, ChevronRight, BrainCircuit, GraduationCap, 
@@ -113,7 +114,7 @@ export default function App() {
       setSets(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
     });
 
-    // Recovery
+    // Recovery (Old Public Data)
     const oldPath = collection(db, 'studySets');
     const unsubscribeOld = onSnapshot(oldPath, (snapshot) => {
       setOldSets(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
@@ -133,16 +134,17 @@ export default function App() {
     };
   }, [user]);
 
-  // Derived Active Set (Crucial Fix: Ensure it reacts to sets updating)
+  // Derived Active Set
   const activeSet = useMemo(() => {
     return sets.find(s => s.id === activeSetId) || null;
   }, [sets, activeSetId]);
 
+  // Global Reordering logic for the Library
   const filteredSets = useMemo(() => {
-    return sets.filter(s => 
-      s.type === activeTab && 
-      (s.title || '').toLowerCase().includes(searchQuery.toLowerCase())
-    );
+    const list = sets.filter(s => s.type === activeTab);
+    // Sort by orderIndex first, then by updatedAt
+    return list.sort((a, b) => (a.orderIndex || 0) - (b.orderIndex || 0))
+               .filter(s => (s.title || '').toLowerCase().includes(searchQuery.toLowerCase()));
   }, [sets, activeTab, searchQuery]);
 
   const stats = useMemo(() => {
@@ -155,7 +157,7 @@ export default function App() {
     return { flashcardCount, examCount, totalQuestions, avgScore };
   }, [sets, history]);
 
-  // Actions
+  // Auth Actions
   const handleAuth = async (e) => {
     e.preventDefault();
     setAuthError('');
@@ -204,6 +206,33 @@ export default function App() {
     finally { setTimeout(() => setSyncing(false), 800); }
   };
 
+  // REORDER LOGIC FOR LIBRARY SETS
+  const moveSet = async (index, direction) => {
+    const newFilteredList = [...filteredSets];
+    const targetIndex = index + direction;
+    if (targetIndex < 0 || targetIndex >= newFilteredList.length) return;
+
+    setSyncing(true);
+    const itemA = newFilteredList[index];
+    const itemB = newFilteredList[targetIndex];
+
+    // Swap orderIndex values
+    const batch = writeBatch(db);
+    const refA = doc(db, 'artifacts', appId, 'users', user.uid, 'studySets', itemA.id);
+    const refB = doc(db, 'artifacts', appId, 'users', user.uid, 'studySets', itemB.id);
+
+    // If they don't have orderIndex yet, initialize them
+    const newOrderA = targetIndex;
+    const newOrderB = index;
+
+    batch.update(refA, { orderIndex: newOrderA });
+    batch.update(refB, { orderIndex: newOrderB });
+
+    await batch.commit();
+    setSyncing(false);
+  };
+
+  // REORDER LOGIC FOR QUESTIONS WITHIN A SET
   const moveItem = (index, direction) => {
     if (!activeSet?.items) return;
     const newItems = [...activeSet.items];
@@ -220,6 +249,7 @@ export default function App() {
       title: type === 'flashcards' ? 'New Deck' : 'New Exam',
       type: type,
       items: [],
+      orderIndex: sets.filter(s => s.type === type).length,
       updatedAt: Date.now()
     });
     setActiveSetId(docRef.id);
@@ -238,6 +268,7 @@ export default function App() {
       title: oldSet.title + " (Recovered)",
       type: oldSet.type || 'flashcards',
       items: oldSet.items || [],
+      orderIndex: sets.length,
       updatedAt: Date.now()
     });
   });
@@ -342,7 +373,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans pb-24">
-      {/* Header */}
+      {/* Universal Header */}
       <nav className="bg-white/80 backdrop-blur-md border-b border-slate-200 sticky top-0 z-50 px-6 h-20 flex items-center justify-between">
         <div className="flex items-center gap-3 cursor-pointer" onClick={() => setView('dashboard')}>
           <div className="bg-indigo-600 p-2 rounded-xl text-white shadow-lg"><BrainCircuit size={22} /></div>
@@ -360,12 +391,12 @@ export default function App() {
       </nav>
 
       <main className="max-w-4xl mx-auto px-6 py-8">
-        {/* DASHBOARD */}
+        {/* DASHBOARD (Main Menu) */}
         {view === 'dashboard' && (
           <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
             <header className="mb-12">
                <h1 className="text-4xl font-black text-slate-800 tracking-tight">Hello, {profile.displayName.split(' ')[0]}!</h1>
-               <p className="text-slate-400 font-medium mt-1">Ready to master your real estate exam?</p>
+               <p className="text-slate-400 font-medium mt-1">What are we mastering today?</p>
             </header>
 
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-12">
@@ -391,18 +422,18 @@ export default function App() {
                <div onClick={() => { setActiveTab('flashcards'); setView('library'); }} className="bg-white p-10 rounded-[4rem] border border-slate-200 shadow-sm hover:shadow-xl transition-all cursor-pointer group">
                   <div className="bg-indigo-50 w-16 h-16 rounded-2xl flex items-center justify-center text-indigo-600 mb-6 group-hover:bg-indigo-600 group-hover:text-white transition-all"><BookOpen size={32}/></div>
                   <h4 className="text-2xl font-black mb-1">Flashcards</h4>
-                  <p className="text-slate-400 text-sm font-medium">Drill your vocabulary.</p>
+                  <p className="text-slate-400 text-sm font-medium">Flash drill concepts.</p>
                </div>
                <div onClick={() => { setActiveTab('quizzes'); setView('library'); }} className="bg-white p-10 rounded-[4rem] border border-slate-200 shadow-sm hover:shadow-xl transition-all cursor-pointer group">
                   <div className="bg-emerald-50 w-16 h-16 rounded-2xl flex items-center justify-center text-emerald-600 mb-6 group-hover:bg-emerald-600 group-hover:text-white transition-all"><GraduationCap size={32}/></div>
-                  <h4 className="text-2xl font-black mb-1">Exams</h4>
-                  <p className="text-slate-400 text-sm font-medium">Test your knowledge.</p>
+                  <h4 className="text-2xl font-black mb-1">Exam Center</h4>
+                  <p className="text-slate-400 text-sm font-medium">Practice examinations.</p>
                </div>
             </div>
           </div>
         )}
 
-        {/* PROFILE */}
+        {/* PROFILE PAGE */}
         {view === 'profile' && (
           <div className="max-w-xl mx-auto animate-in zoom-in-95 duration-300">
              <button onClick={() => setView('dashboard')} className="mb-8 text-slate-400 font-black text-[10px] uppercase flex items-center gap-2"><ChevronLeft size={16}/> Back</button>
@@ -437,7 +468,7 @@ export default function App() {
           </div>
         )}
 
-        {/* LIBRARY */}
+        {/* LIBRARY (With Global Set Reordering) */}
         {view === 'library' && (
           <div className="animate-in fade-in duration-500">
             <header className="flex justify-between items-center mb-8">
@@ -446,11 +477,8 @@ export default function App() {
             </header>
 
             {oldSets.length > 0 && !showRecovery && (
-              <div className="bg-amber-50 border border-amber-200 p-6 rounded-[2rem] mb-8 flex items-center justify-between shadow-sm animate-in slide-in-from-top-4">
-                 <div className="flex items-center gap-4">
-                    <div className="text-amber-500"><AlertTriangle size={24}/></div>
-                    <p className="text-amber-800 text-[11px] font-black uppercase tracking-widest">Found legacy content. Migrate?</p>
-                 </div>
+              <div className="bg-amber-50 border border-amber-200 p-6 rounded-[2rem] mb-8 flex items-center justify-between shadow-sm">
+                 <div className="flex items-center gap-4"><div className="text-amber-500"><AlertTriangle size={24}/></div><p className="text-amber-800 text-[11px] font-black uppercase tracking-widest">Found legacy content. Migrate?</p></div>
                  <button onClick={() => setShowRecovery(true)} className="bg-amber-500 text-white px-5 py-2 rounded-xl text-[9px] font-black uppercase">View</button>
               </div>
             )}
@@ -469,19 +497,38 @@ export default function App() {
                </div>
             )}
 
-            <h2 className="text-3xl font-black text-slate-800 mb-8 tracking-tight">{activeTab === 'flashcards' ? 'Flashcards' : 'Exams'}</h2>
+            <h2 className="text-3xl font-black text-slate-800 mb-8 tracking-tight">{activeTab === 'flashcards' ? 'My Decks' : 'My Practice Exams'}</h2>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 gap-6">
               {filteredSets.length === 0 ? (
-                <div className="col-span-full py-20 bg-white rounded-[3.5rem] border-2 border-dashed border-slate-200 text-center flex flex-col items-center">
+                <div className="py-20 bg-white rounded-[3.5rem] border-2 border-dashed border-slate-200 text-center flex flex-col items-center">
                    <div className="bg-slate-50 p-6 rounded-full mb-4 text-slate-200"><Plus size={48}/></div>
-                   <p className="text-slate-400 font-bold uppercase text-[10px] tracking-widest">Nothing here yet</p>
+                   <p className="text-slate-400 font-bold uppercase text-[10px] tracking-widest">No sets found</p>
                 </div>
               ) : (
-                filteredSets.map(set => (
-                  <div key={set.id} className="bg-white p-6 rounded-[2.5rem] border border-slate-200 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all cursor-pointer group" onClick={() => { setActiveSetId(set.id); setView(activeTab === 'flashcards' ? 'study' : 'quiz-ready'); setCurrentCardIndex(0); setIsFlipped(false); }}>
-                    <div className="flex justify-between items-start mb-2"><h3 className="text-xl font-black group-hover:text-indigo-600 leading-tight">{set.title}</h3><button onClick={(e) => { e.stopPropagation(); deleteSet(set.id); }} className="text-slate-100 hover:text-red-500 transition-colors"><Trash2 size={18}/></button></div>
-                    <div className="mt-8 flex gap-3"><button className="flex-1 bg-indigo-50 text-indigo-600 py-4 rounded-[1.25rem] text-[10px] font-black uppercase tracking-widest group-hover:bg-indigo-600 group-hover:text-white transition-all">Launch</button></div>
+                filteredSets.map((set, idx) => (
+                  <div 
+                    key={set.id} 
+                    className="bg-white p-6 rounded-[2.5rem] border border-slate-200 shadow-sm hover:shadow-xl hover:-translate-y-0.5 transition-all flex items-center gap-6 cursor-pointer group"
+                    onClick={() => { setActiveSetId(set.id); setView(activeTab === 'flashcards' ? 'study' : 'quiz-ready'); setCurrentCardIndex(0); setIsFlipped(false); }}
+                  >
+                    {/* GLOBAL REORDER ARROWS (On Left for Desktop, Right for Mobile if you prefer) */}
+                    <div className="flex flex-col bg-slate-50 p-1.5 rounded-2xl gap-1 border border-slate-100" onClick={e => e.stopPropagation()}>
+                       <button onClick={() => moveSet(idx, -1)} disabled={idx === 0} className={`p-1.5 rounded-lg ${idx === 0 ? 'text-slate-200' : 'bg-white text-indigo-600 shadow-sm hover:scale-110 active:scale-90'}`}><ChevronUp size={20} strokeWidth={3}/></button>
+                       <button onClick={() => moveSet(idx, 1)} disabled={idx === filteredSets.length - 1} className={`p-1.5 rounded-lg ${idx === filteredSets.length - 1 ? 'text-slate-200' : 'bg-white text-indigo-600 shadow-sm hover:scale-110 active:scale-90'}`}><ChevronDown size={20} strokeWidth={3}/></button>
+                    </div>
+
+                    <div className="flex-1">
+                      <h3 className="text-xl font-black group-hover:text-indigo-600 leading-tight transition-colors">{set.title}</h3>
+                      <div className="flex items-center gap-4 mt-1">
+                         <div className="text-[10px] font-black uppercase text-slate-400 tracking-widest">{set.items?.length || 0} ITEMS</div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2" onClick={e => e.stopPropagation()}>
+                       <button onClick={() => { setActiveSetId(set.id); setView('edit'); }} className="p-3 bg-slate-50 text-slate-400 rounded-2xl hover:bg-indigo-50 hover:text-indigo-600 transition-all"><Settings size={18}/></button>
+                       <button onClick={() => deleteSet(set.id)} className="p-3 bg-slate-50 text-slate-400 rounded-2xl hover:bg-rose-50 hover:text-rose-500 transition-all"><Trash2 size={18}/></button>
+                    </div>
                   </div>
                 ))
               )}
@@ -489,12 +536,12 @@ export default function App() {
           </div>
         )}
 
-        {/* EDITOR */}
+        {/* EDITOR (Question Reordering) */}
         {view === 'edit' && activeSet && (
           <div className="animate-in fade-in duration-300 pb-20">
             <div className="flex justify-between items-center mb-8 sticky top-16 bg-slate-50/90 py-4 z-40 border-b border-slate-200">
               <button onClick={() => setView('library')} className="text-slate-400 p-2"><ChevronLeft size={24}/></button>
-              <div className="flex gap-2"><button onClick={() => setIsImporting(true)} className="bg-white border border-slate-200 px-6 rounded-2xl text-[10px] font-black uppercase tracking-widest">Bulk</button><button onClick={() => setView('library')} className="bg-indigo-600 text-white px-8 rounded-2xl text-[10px] font-black uppercase tracking-widest shadow-lg">Done</button></div>
+              <div className="flex gap-2"><button onClick={() => setIsImporting(true)} className="bg-white border border-slate-200 px-6 rounded-2xl text-[10px] font-black uppercase tracking-widest">Bulk Import</button><button onClick={() => setView('library')} className="bg-indigo-600 text-white px-8 rounded-2xl text-[10px] font-black uppercase tracking-widest shadow-lg">Save & Exit</button></div>
             </div>
             <input value={activeSet.title} onChange={e => updateSet(activeSetId, { title: e.target.value })} className="w-full text-4xl font-black outline-none border-b-4 border-slate-50 focus:border-indigo-500 transition-all pb-3 mb-10" placeholder="Set Title..."/>
             <div className="space-y-8">
@@ -502,7 +549,7 @@ export default function App() {
                 <div key={item.id} className="bg-white p-10 rounded-[3.5rem] border border-slate-200 shadow-sm relative group">
                   <div className="flex justify-between items-center mb-10">
                     <div className="flex items-center gap-4">
-                       <span className="bg-slate-100 text-slate-400 px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest">Item {i+1}</span>
+                       <span className="bg-slate-100 text-slate-400 px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest">Question {i+1}</span>
                        <div className="flex bg-slate-100 p-1 rounded-xl gap-1 border border-slate-200">
                           <button onClick={() => moveItem(i, -1)} disabled={i === 0} className={`p-2.5 rounded-xl transition-all ${i === 0 ? 'text-slate-200' : 'bg-white text-indigo-600 shadow-md hover:scale-110 active:scale-90'}`}><ChevronUp size={24} strokeWidth={3}/></button>
                           <button onClick={() => moveItem(i, 1)} disabled={i === activeSet.items.length - 1} className={`p-2.5 rounded-xl transition-all ${i === activeSet.items.length - 1 ? 'text-slate-200' : 'bg-white text-indigo-600 shadow-md hover:scale-110 active:scale-90'}`}><ChevronDown size={24} strokeWidth={3}/></button>
@@ -521,7 +568,7 @@ export default function App() {
                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                           {['a', 'b', 'c', 'd'].map(key => (
                             <div key={key} className="flex items-center gap-2">
-                               <button onClick={() => { const ni = [...activeSet.items]; ni[i].correctAnswer = key; updateSet(activeSetId, {items:ni}); }} className={`w-10 h-10 rounded-xl font-black uppercase ${item.correctAnswer === key ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-300'}`}>{key}</button>
+                               <button onClick={() => { const ni = [...activeSet.items]; ni[i].correctAnswer = key; updateSet(activeSetId, {items:ni}); }} className={`w-10 h-10 rounded-xl font-black uppercase ${item.correctAnswer === key ? 'bg-indigo-600 text-white shadow-md' : 'bg-slate-100 text-slate-300'}`}>{key}</button>
                                <input value={item.options[key]} onChange={e => { const ni = [...activeSet.items]; ni[i].options[key] = e.target.value; updateSet(activeSetId, { items: ni }); }} className="flex-1 font-bold outline-none border-b-2 border-slate-50 focus:border-indigo-500" placeholder={`Option ${key}`} />
                             </div>
                           ))}
@@ -535,7 +582,7 @@ export default function App() {
           </div>
         )}
 
-        {/* STUDY */}
+        {/* STUDY ENGINE */}
         {view === 'study' && activeSet && (
           <div className="max-w-2xl mx-auto text-center animate-in zoom-in-95 duration-300">
             <div className="flex justify-between items-center mb-8"><button onClick={() => setView('library')} className="text-slate-400 font-black text-[10px] uppercase flex items-center gap-2 hover:text-indigo-600"><ChevronLeft size={16}/> Back</button><button onClick={() => setView('edit')} className="bg-indigo-600 text-white px-6 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg active:scale-95 transition-all">Edit Deck</button></div>
@@ -543,7 +590,7 @@ export default function App() {
             <div className="bg-indigo-50 text-indigo-600 inline-block px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest mb-10">{currentCardIndex + 1} / {activeSet.items?.length || 0}</div>
             <div className="aspect-[16/10] relative perspective-1000 cursor-pointer mb-12 select-none group" onClick={() => setIsFlipped(!isFlipped)}>
               <div className={`w-full h-full relative transition-transform duration-700 transform-style-3d ${isFlipped ? 'rotate-y-180' : ''}`}>
-                <div className="absolute inset-0 backface-hidden bg-white rounded-[3.5rem] border-b-[10px] border-slate-200 shadow-2xl flex items-center justify-center p-12 text-3xl font-black text-slate-800">{activeSet.items[currentCardIndex]?.term}</div>
+                <div className="absolute inset-0 backface-hidden bg-white rounded-[3.5rem] border-b-[10px] border-slate-200 shadow-2xl flex items-center justify-center p-12 text-3xl font-black text-slate-800 leading-tight">{activeSet.items[currentCardIndex]?.term}</div>
                 <div className="absolute inset-0 backface-hidden bg-white rounded-[3.5rem] border-b-[10px] border-slate-200 shadow-2xl flex items-center justify-center p-12 text-2xl font-medium rotate-y-180 text-indigo-700 leading-relaxed overflow-y-auto">{activeSet.items[currentCardIndex]?.definition}</div>
               </div>
             </div>
@@ -551,7 +598,7 @@ export default function App() {
           </div>
         )}
 
-        {/* QUIZ READY */}
+        {/* QUIZ READY SCREEN */}
         {view === 'quiz-ready' && activeSet && (
           <div className="max-w-xl mx-auto text-center animate-in zoom-in-95 duration-300">
              <div className="bg-white p-16 rounded-[4.5rem] border border-slate-200 shadow-2xl mb-10">
@@ -563,11 +610,11 @@ export default function App() {
                   <button onClick={() => setView('edit')} className="bg-slate-50 text-slate-500 py-4 rounded-3xl font-black uppercase text-[10px] tracking-widest hover:bg-slate-100 transition-all">Modify Bank</button>
                 </div>
              </div>
-             <button onClick={() => setView('library')} className="text-slate-400 font-black text-[10px] uppercase tracking-widest flex items-center gap-2 mx-auto"><ChevronLeft size={16}/> Back</button>
+             <button onClick={() => setView('library')} className="text-slate-400 font-black text-[10px] uppercase tracking-widest flex items-center gap-2 mx-auto"><ChevronLeft size={16}/> Back to Library</button>
           </div>
         )}
 
-        {/* QUIZ */}
+        {/* QUIZ ENGINE */}
         {view === 'quiz' && activeSet && (
           <div className="animate-in fade-in duration-300 space-y-10 pb-20">
             {!quizResults ? (
@@ -599,7 +646,7 @@ export default function App() {
         )}
       </main>
 
-      {/* Bottom Nav */}
+      {/* Persistent Bottom Bar */}
       {user && (
         <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 px-8 py-4 flex justify-around items-center z-50 shadow-lg">
           <button onClick={() => setView('dashboard')} className={`flex flex-col items-center gap-1 ${view === 'dashboard' ? 'text-indigo-600' : 'text-slate-300'}`}>
