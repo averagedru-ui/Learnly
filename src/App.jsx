@@ -17,8 +17,7 @@ import {
   updateDoc, 
   deleteDoc, 
   onSnapshot,
-  setDoc,
-  getDoc
+  setDoc
 } from 'firebase/firestore';
 import { 
   Trash2, ChevronLeft, ChevronRight, BrainCircuit, GraduationCap, 
@@ -53,7 +52,9 @@ export default function App() {
   const [authMode, setAuthMode] = useState('login'); 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [displayName, setDisplayName] = useState(''); // New for Profile Creation
+
+  // Local state for name editing to prevent "Student" reset bug
+  const [editName, setEditName] = useState('');
   const [authError, setAuthError] = useState('');
 
   const [sets, setSets] = useState([]);
@@ -63,7 +64,7 @@ export default function App() {
   const [syncing, setSyncing] = useState(false);
   const [showRecovery, setShowRecovery] = useState(false);
 
-  // NAVIGATION: Now defaults to 'dashboard'
+  // Navigation
   const [view, setView] = useState('dashboard'); 
   const [activeTab, setActiveTab] = useState('flashcards'); 
   const [activeSetId, setActiveSetId] = useState(null);
@@ -95,24 +96,26 @@ export default function App() {
 
     // User Profile Listener
     const profileRef = doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'info');
-    const unsubscribeProfile = onSnapshot(profileRef, (doc) => {
-      if (doc.exists()) setProfile(doc.data());
+    const unsubscribeProfile = onSnapshot(profileRef, (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        setProfile(data);
+        // We only initialize editName if it hasn't been touched yet
+        setEditName(prev => prev === '' ? data.displayName : prev);
+      }
       setStatus('ready');
     });
 
-    // Private Study Sets
     const setsPath = collection(db, 'artifacts', appId, 'users', user.uid, 'studySets');
     const unsubscribeSets = onSnapshot(setsPath, (snapshot) => {
       setSets(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
     });
 
-    // Old Public Data (Recovery)
     const oldPath = collection(db, 'studySets');
     const unsubscribeOld = onSnapshot(oldPath, (snapshot) => {
       setOldSets(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
     });
 
-    // History
     const historyPath = collection(db, 'artifacts', appId, 'users', user.uid, 'quizHistory');
     const unsubscribeHistory = onSnapshot(historyPath, (snapshot) => {
       setHistory(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })).sort((a, b) => b.timestamp - a.timestamp));
@@ -126,7 +129,7 @@ export default function App() {
     };
   }, [user]);
 
-  // Derived Stats for Dashboard
+  // Derived Stats
   const stats = useMemo(() => {
     const flashcardCount = sets.filter(s => s.type === 'flashcards').length;
     const examCount = sets.filter(s => s.type === 'quizzes').length;
@@ -137,7 +140,7 @@ export default function App() {
     return { flashcardCount, examCount, totalQuestions, avgScore };
   }, [sets, history]);
 
-  // Auth Actions
+  // Actions
   const handleAuth = async (e) => {
     e.preventDefault();
     setAuthError('');
@@ -146,10 +149,9 @@ export default function App() {
         await signInWithEmailAndPassword(auth, email, password);
       } else {
         const userCred = await createUserWithEmailAndPassword(auth, email, password);
-        // Create initial profile doc on signup
         const profileRef = doc(db, 'artifacts', appId, 'users', userCred.user.uid, 'profile', 'info');
         await setDoc(profileRef, {
-          displayName: displayName || 'New Student',
+          displayName: editName || 'Student',
           email: email,
           createdAt: Date.now()
         });
@@ -160,16 +162,18 @@ export default function App() {
     }
   };
 
-  const handleUpdateProfile = async (newName) => {
-    if (!user) return;
+  const handleUpdateProfile = async () => {
+    if (!user || !editName) return;
+    setSyncing(true);
     const profileRef = doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'info');
-    await updateDoc(profileRef, { displayName: newName });
+    await updateDoc(profileRef, { displayName: editName });
+    setSyncing(false);
   };
 
   const handleLogout = () => {
     signOut(auth);
+    setEditName('');
     setView('dashboard');
-    setActiveTab('flashcards');
   };
 
   const handleSave = async (op) => {
@@ -178,7 +182,6 @@ export default function App() {
     finally { setTimeout(() => setSyncing(false), 800); }
   };
 
-  // Reordering & Database Logic (Preserved from previous version)
   const moveItem = (index, direction) => {
     const activeSet = sets.find(s => s.id === activeSetId);
     if (!activeSet?.items) return;
@@ -223,27 +226,78 @@ export default function App() {
     await deleteDoc(setRef);
   });
 
+  const handleImport = () => {
+    const newItems = [];
+    const activeSet = sets.find(s => s.id === activeSetId);
+    if (activeTab === 'flashcards') {
+      const regex = /Front:\s*(.*?)\s*Back:\s*(.*)/gi;
+      let m; while ((m = regex.exec(importText)) !== null) {
+        newItems.push({ id: Math.random().toString(36).substr(2,9), term: m[1].trim(), definition: m[2].trim() });
+      }
+    } else {
+      const blocks = importText.split(/\n\s*\n/);
+      blocks.forEach(block => {
+        const qM = block.match(/Q:\s*(.*)/i);
+        if (qM) {
+          const a = block.match(/A:\s*(.*)/i), b = block.match(/B:\s*(.*)/i), c = block.match(/C:\s*(.*)/i), d = block.match(/D:\s*(.*)/i), ans = block.match(/Ans:\s*([A-D]|True|False)/i);
+          if (a && b && c && d) {
+            newItems.push({ id: Math.random().toString(36).substr(2,9), type: 'mc', question: qM[1].trim(), options: { a: a[1].trim(), b: b[1].trim(), c: c[1].trim(), d: d[1].trim() }, correctAnswer: ans ? ans[1].toLowerCase() : 'a' });
+          } else if (ans) {
+            newItems.push({ id: Math.random().toString(36).substr(2,9), type: 'tf', question: qM[1].trim(), correctAnswer: ans[1].toLowerCase() });
+          }
+        }
+      });
+    }
+    if (newItems.length) {
+      updateSet(activeSetId, { items: [...(activeSet.items || []), ...newItems] });
+      setIsImporting(false); setImportText('');
+    }
+  };
+
+  const startQuiz = (onlyMissed = false) => {
+    const activeSet = sets.find(s => s.id === activeSetId);
+    if (!activeSet?.items || activeSet.items.length === 0) return;
+    let items = onlyMissed ? activeSet.items.filter(it => quizResults.missedIds.includes(it.id)) : activeSet.items;
+    setQuizQuestions([...items].sort(() => 0.5 - Math.random()));
+    setQuizAnswers({});
+    setQuizResults(null);
+    setIsRetakingMissed(onlyMissed);
+    setView('quiz');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const finishQuiz = async () => {
+    const activeSet = sets.find(s => s.id === activeSetId);
+    let score = 0; const missed = [], missedIds = [];
+    quizQuestions.forEach(q => {
+      if (quizAnswers[q.id] === q.correctAnswer) score++;
+      else { missedIds.push(q.id); missed.push({ q: q.question, user: quizAnswers[q.id] || 'None', correct: q.correctAnswer, options: q.options }); }
+    });
+    setQuizResults({ score, total: quizQuestions.length, missed, missedIds });
+    if (!isRetakingMissed) {
+      const historyPath = collection(db, 'artifacts', appId, 'users', user.uid, 'quizHistory');
+      await addDoc(historyPath, { setTitle: activeSet.title, score, total: quizQuestions.length, timestamp: Date.now() });
+    }
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   if (status === 'loading') return <div className="min-h-screen flex items-center justify-center bg-white"><RefreshCw className="animate-spin text-indigo-600" size={32} /></div>;
 
-  // LOGIN & SIGNUP SCREEN
+  // LOGIN SCREEN
   if (!user) return (
     <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-6">
       <div className="w-full max-w-md bg-white p-10 rounded-[4rem] border border-slate-200 shadow-2xl animate-in zoom-in-95 duration-300">
         <div className="flex justify-center mb-8">
            <div className="bg-indigo-600 p-4 rounded-3xl text-white shadow-xl shadow-indigo-100"><BrainCircuit size={40} /></div>
         </div>
-        <h1 className="text-3xl font-black text-center mb-2 tracking-tight">
-          {authMode === 'login' ? 'Welcome Back' : 'Get Started'}
-        </h1>
-        <p className="text-slate-400 text-center mb-10 font-medium">
-          {authMode === 'login' ? 'Login to access your private menu.' : 'Join Learnly to save your progress.'}
-        </p>
+        <h1 className="text-3xl font-black text-center mb-2 tracking-tight">{authMode === 'login' ? 'Welcome Back' : 'Get Started'}</h1>
+        <p className="text-slate-400 text-center mb-10 font-medium">{authMode === 'login' ? 'Login to access your menu.' : 'Create an account to save progress.'}</p>
 
         <form onSubmit={handleAuth} className="space-y-4">
           {authMode === 'signup' && (
             <div className="relative">
               <User className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
-              <input type="text" value={displayName} onChange={e => setDisplayName(e.target.value)} placeholder="Full Name" required className="w-full bg-slate-50 border border-slate-100 pl-12 pr-4 py-4 rounded-2xl outline-none focus:ring-4 focus:ring-indigo-500/5 transition-all font-bold" />
+              <input type="text" value={editName} onChange={e => setEditName(e.target.value)} placeholder="Full Name" required className="w-full bg-slate-50 border border-slate-100 pl-12 pr-4 py-4 rounded-2xl outline-none focus:ring-4 focus:ring-indigo-500/5 transition-all font-bold" />
             </div>
           )}
           <div className="relative">
@@ -254,260 +308,171 @@ export default function App() {
             <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
             <input type="password" autoComplete={authMode === 'login' ? 'current-password' : 'new-password'} value={password} onChange={e => setPassword(e.target.value)} placeholder="Password" required className="w-full bg-slate-50 border border-slate-100 pl-12 pr-4 py-4 rounded-2xl outline-none focus:ring-4 focus:ring-indigo-500/5 transition-all font-bold" />
           </div>
-
-          <div className="flex items-center justify-between px-2 pb-4">
-             <div className="flex items-center gap-1 text-[10px] font-black uppercase tracking-widest text-slate-300">
-                <Fingerprint size={12}/> Biometrics Enabled
-             </div>
-          </div>
-
           {authError && <div className="text-rose-500 text-xs font-bold text-center bg-rose-50 py-3 rounded-xl border border-rose-100">{authError}</div>}
-
-          <button type="submit" className="w-full bg-indigo-600 text-white py-5 rounded-3xl font-black uppercase text-xs tracking-widest shadow-xl shadow-indigo-100 hover:scale-[1.02] active:scale-95 transition-all">
+          <button type="submit" className="w-full bg-indigo-600 text-white py-5 rounded-3xl font-black uppercase text-xs tracking-widest shadow-xl shadow-indigo-100 active:scale-95 transition-all">
             {authMode === 'login' ? 'Login' : 'Sign Up'}
           </button>
         </form>
-
-        <div className="mt-8 pt-8 border-t border-slate-50 text-center">
-           <button onClick={() => { setAuthMode(authMode === 'login' ? 'signup' : 'login'); setAuthError(''); }} className="text-slate-400 font-black text-[10px] uppercase tracking-widest hover:text-indigo-600 transition-all flex items-center justify-center gap-2 mx-auto">
-             {authMode === 'login' ? <><UserPlus size={14}/> New user? Create Account</> : <><Mail size={14}/> Member? Log In</>}
-           </button>
-        </div>
+        <button onClick={() => { setAuthMode(authMode === 'login' ? 'signup' : 'login'); setAuthError(''); }} className="w-full mt-8 text-slate-400 font-black text-[10px] uppercase tracking-widest hover:text-indigo-600 transition-all text-center">
+          {authMode === 'login' ? 'New user? Create Account' : 'Member? Log In'}
+        </button>
       </div>
     </div>
   );
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans pb-24">
-      {/* Universal Header */}
+      {/* Header */}
       <nav className="bg-white/80 backdrop-blur-md border-b border-slate-200 sticky top-0 z-50 px-6 h-20 flex items-center justify-between">
         <div className="flex items-center gap-3 cursor-pointer" onClick={() => setView('dashboard')}>
           <div className="bg-indigo-600 p-2 rounded-xl text-white shadow-lg"><BrainCircuit size={22} /></div>
           <span className="font-black text-2xl tracking-tighter">LEARNLY</span>
         </div>
-        <div className="flex items-center gap-3">
-          {syncing && <RefreshCw size={16} className="animate-spin text-indigo-500 mr-2" />}
-          <div 
-            onClick={() => setView('profile')}
-            className="w-10 h-10 rounded-full bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 cursor-pointer hover:bg-indigo-600 hover:text-white transition-all overflow-hidden"
-          >
-            <User size={20} />
-          </div>
+        <div 
+          onClick={() => setView('profile')}
+          className="w-10 h-10 rounded-full bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 cursor-pointer hover:bg-indigo-600 hover:text-white transition-all overflow-hidden"
+        >
+          <User size={20} />
         </div>
       </nav>
 
       <main className="max-w-4xl mx-auto px-6 py-8">
-        {/* MAIN MENU (DASHBOARD) */}
+        {/* DASHBOARD */}
         {view === 'dashboard' && (
           <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
             <header className="mb-12">
                <h1 className="text-4xl font-black text-slate-800 tracking-tight">Hello, {profile.displayName.split(' ')[0]}!</h1>
-               <p className="text-slate-400 font-medium mt-1">What would you like to study today?</p>
+               <p className="text-slate-400 font-medium mt-1">Ready to master your real estate exam?</p>
             </header>
 
-            {/* Quick Stats Row */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-12">
-               <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm">
-                  <div className="text-indigo-500 mb-2"><BookOpen size={20}/></div>
+               <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm text-center">
                   <div className="text-2xl font-black">{stats.flashcardCount + stats.examCount}</div>
-                  <div className="text-[10px] font-black uppercase text-slate-400 tracking-widest">Total Sets</div>
+                  <div className="text-[10px] font-black uppercase text-slate-400 tracking-widest">Sets</div>
                </div>
-               <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm">
-                  <div className="text-amber-500 mb-2"><Zap size={20}/></div>
+               <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm text-center">
                   <div className="text-2xl font-black">{stats.totalQuestions}</div>
-                  <div className="text-[10px] font-black uppercase text-slate-400 tracking-widest">Questions</div>
+                  <div className="text-[10px] font-black uppercase text-slate-400 tracking-widest">Cards</div>
                </div>
-               <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm">
-                  <div className="text-emerald-500 mb-2"><TrendingUp size={20}/></div>
+               <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm text-center">
                   <div className="text-2xl font-black">{stats.avgScore}%</div>
-                  <div className="text-[10px] font-black uppercase text-slate-400 tracking-widest">Avg. Score</div>
+                  <div className="text-[10px] font-black uppercase text-slate-400 tracking-widest">Avg</div>
                </div>
-               <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm">
-                  <div className="text-indigo-500 mb-2"><History size={20}/></div>
+               <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm text-center">
                   <div className="text-2xl font-black">{history.length}</div>
-                  <div className="text-[10px] font-black uppercase text-slate-400 tracking-widest">Sessions</div>
+                  <div className="text-[10px] font-black uppercase text-slate-400 tracking-widest">Tests</div>
                </div>
             </div>
 
-            {/* Main Menu Actions */}
-            <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-300 mb-6">Study Hub</h3>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-12">
-               <div 
-                 onClick={() => { setActiveTab('flashcards'); setView('library'); }}
-                 className="bg-white p-8 rounded-[3rem] border border-slate-200 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all cursor-pointer group"
-               >
-                  <div className="bg-indigo-50 w-16 h-16 rounded-2xl flex items-center justify-center text-indigo-600 mb-6 group-hover:bg-indigo-600 group-hover:text-white transition-all">
-                     <LayoutGrid size={32}/>
-                  </div>
-                  <h4 className="text-2xl font-black mb-2">Flashcards</h4>
-                  <p className="text-slate-400 text-sm font-medium">Master your vocabulary and key real estate concepts.</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+               <div onClick={() => { setActiveTab('flashcards'); setView('library'); }} className="bg-white p-10 rounded-[4rem] border border-slate-200 shadow-sm hover:shadow-xl transition-all cursor-pointer group">
+                  <div className="bg-indigo-50 w-16 h-16 rounded-2xl flex items-center justify-center text-indigo-600 mb-6 group-hover:bg-indigo-600 group-hover:text-white transition-all"><BookOpen size={32}/></div>
+                  <h4 className="text-2xl font-black mb-1">Flashcards</h4>
+                  <p className="text-slate-400 text-sm font-medium">Drill your vocabulary.</p>
                </div>
-
-               <div 
-                 onClick={() => { setActiveTab('quizzes'); setView('library'); }}
-                 className="bg-white p-8 rounded-[3rem] border border-slate-200 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all cursor-pointer group"
-               >
-                  <div className="bg-emerald-50 w-16 h-16 rounded-2xl flex items-center justify-center text-emerald-600 mb-6 group-hover:bg-emerald-600 group-hover:text-white transition-all">
-                     <GraduationCap size={32}/>
-                  </div>
-                  <h4 className="text-2xl font-black mb-2">Exam Center</h4>
-                  <p className="text-slate-400 text-sm font-medium">Simulate the real exam with customized quiz banks.</p>
+               <div onClick={() => { setActiveTab('quizzes'); setView('library'); }} className="bg-white p-10 rounded-[4rem] border border-slate-200 shadow-sm hover:shadow-xl transition-all cursor-pointer group">
+                  <div className="bg-emerald-50 w-16 h-16 rounded-2xl flex items-center justify-center text-emerald-600 mb-6 group-hover:bg-emerald-600 group-hover:text-white transition-all"><GraduationCap size={32}/></div>
+                  <h4 className="text-2xl font-black mb-1">Exams</h4>
+                  <p className="text-slate-400 text-sm font-medium">Test your knowledge.</p>
                </div>
             </div>
-
-            {/* Recent Activity */}
-            {history.length > 0 && (
-              <div className="animate-in slide-in-from-bottom-4 delay-300 duration-700">
-                 <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-300 mb-6">Recent History</h3>
-                 <div className="bg-white rounded-[2.5rem] border border-slate-200 overflow-hidden shadow-sm">
-                    {history.slice(0, 3).map((entry, idx) => (
-                      <div key={entry.id} className="flex items-center justify-between p-6 border-b border-slate-50 last:border-0">
-                         <div className="flex items-center gap-4">
-                            <div className="p-2 rounded-xl bg-slate-50 text-slate-400"><Clock size={18}/></div>
-                            <div>
-                               <div className="font-bold text-sm">{entry.setTitle}</div>
-                               <div className="text-[9px] font-black text-slate-300 uppercase">{new Date(entry.timestamp).toLocaleDateString()}</div>
-                            </div>
-                         </div>
-                         <div className="font-black text-lg text-indigo-600">{entry.score}/{entry.total}</div>
-                      </div>
-                    ))}
-                 </div>
-              </div>
-            )}
           </div>
         )}
 
-        {/* PROFILE PAGE */}
+        {/* PROFILE PAGE (Fixed Name Bug) */}
         {view === 'profile' && (
           <div className="max-w-xl mx-auto animate-in zoom-in-95 duration-300">
-             <button onClick={() => setView('dashboard')} className="mb-8 text-slate-400 font-black text-[10px] uppercase flex items-center gap-2"><ChevronLeft size={16}/> Back to Menu</button>
+             <button onClick={() => setView('dashboard')} className="mb-8 text-slate-400 font-black text-[10px] uppercase flex items-center gap-2"><ChevronLeft size={16}/> Back</button>
 
              <div className="bg-white p-12 rounded-[4rem] border border-slate-200 shadow-2xl text-center mb-6">
-                <div className="w-24 h-24 rounded-full bg-indigo-600 mx-auto mb-6 flex items-center justify-center text-white shadow-xl">
-                   <User size={48} />
-                </div>
+                <div className="w-24 h-24 rounded-full bg-indigo-600 mx-auto mb-6 flex items-center justify-center text-white shadow-xl"><User size={48} /></div>
                 <h2 className="text-3xl font-black mb-1">{profile.displayName}</h2>
                 <p className="text-slate-400 font-medium mb-10">{user.email}</p>
 
                 <div className="space-y-4 text-left">
-                   <div>
-                      <label className="text-[10px] font-black uppercase text-slate-300 tracking-widest ml-4 mb-2 block">Display Name</label>
-                      <input 
-                        type="text" 
-                        value={displayName || profile.displayName} 
-                        onChange={e => setDisplayName(e.target.value)}
-                        className="w-full bg-slate-50 border border-slate-100 p-4 rounded-2xl font-bold outline-none focus:ring-4 focus:ring-indigo-500/5 transition-all"
-                      />
-                   </div>
-                   <button 
-                     onClick={() => handleUpdateProfile(displayName)}
-                     className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-lg"
-                   >
-                     Update Profile
-                   </button>
+                   <label className="text-[10px] font-black uppercase text-slate-300 tracking-widest ml-4 mb-2 block">Display Name</label>
+                   <input 
+                     type="text" 
+                     value={editName} 
+                     onChange={e => setEditName(e.target.value)}
+                     className="w-full bg-slate-50 border border-slate-100 p-4 rounded-2xl font-bold outline-none focus:ring-4 focus:ring-indigo-500/5 transition-all"
+                   />
+                   <button onClick={handleUpdateProfile} className="w-full bg-indigo-600 text-white py-4 rounded-2xl font-black uppercase text-[10px] tracking-widest shadow-lg">Update Profile</button>
                 </div>
              </div>
-
-             <button 
-               onClick={handleLogout}
-               className="w-full bg-rose-50 text-rose-500 py-6 rounded-[2.5rem] font-black uppercase text-[10px] tracking-widest flex items-center justify-center gap-3 border border-rose-100 hover:bg-rose-500 hover:text-white transition-all"
-             >
-               <LogOut size={18}/> Log Out from All Devices
-             </button>
+             <button onClick={handleLogout} className="w-full bg-rose-50 text-rose-500 py-6 rounded-[2.5rem] font-black uppercase text-[10px] tracking-widest flex items-center justify-center gap-3 border border-rose-100 hover:bg-rose-500 hover:text-white transition-all"><LogOut size={18}/> Log Out</button>
           </div>
         )}
 
-        {/* LIBRARY VIEW (Filtering by Flashcards/Exams) */}
+        {/* LIBRARY */}
         {view === 'library' && (
           <div className="animate-in fade-in duration-500">
             <header className="flex justify-between items-center mb-8">
                <button onClick={() => setView('dashboard')} className="text-slate-400 font-black text-[10px] uppercase flex items-center gap-2"><ChevronLeft size={16}/> Home</button>
-               <button onClick={() => createSet(activeTab)} className="bg-indigo-600 text-white px-6 py-2.5 rounded-2xl text-[10px] font-black uppercase tracking-widest shadow-lg">+ Add Set</button>
+               <button onClick={() => createSet(activeTab)} className="bg-indigo-600 text-white px-6 py-2.5 rounded-2xl text-[10px] font-black uppercase tracking-widest shadow-lg">+ Add {activeTab === 'flashcards' ? 'Deck' : 'Exam'}</button>
             </header>
-
-            <h2 className="text-3xl font-black text-slate-800 mb-8 tracking-tight">
-               {activeTab === 'flashcards' ? 'My Decks' : 'My Exams'}
-            </h2>
-
+            <h2 className="text-3xl font-black text-slate-800 mb-8 tracking-tight">{activeTab === 'flashcards' ? 'Flashcards' : 'Exams'}</h2>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              {filteredSets.length === 0 ? (
-                <div className="col-span-full py-20 bg-white rounded-[3.5rem] border-2 border-dashed border-slate-200 text-center flex flex-col items-center">
-                   <div className="bg-slate-50 p-6 rounded-full mb-4 text-slate-200"><Plus size={48}/></div>
-                   <p className="text-slate-400 font-bold uppercase text-[10px] tracking-widest mb-6">Library is empty</p>
-                   <button onClick={() => createSet(activeTab)} className="bg-indigo-600 text-white px-10 py-4 rounded-2xl font-black text-[10px] uppercase tracking-widest">Create One Now</button>
+              {filteredSets.map(set => (
+                <div key={set.id} className="bg-white p-6 rounded-[2.5rem] border border-slate-200 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all cursor-pointer group" onClick={() => { setActiveSetId(set.id); setView(activeTab === 'flashcards' ? 'study' : 'quiz-ready'); setCurrentCardIndex(0); }}>
+                  <div className="flex justify-between items-start mb-2"><h3 className="text-xl font-black group-hover:text-indigo-600 leading-tight">{set.title}</h3><button onClick={(e) => { e.stopPropagation(); deleteSet(set.id); }} className="text-slate-100 hover:text-red-500 transition-colors"><Trash2 size={18}/></button></div>
+                  <div className="mt-8 flex gap-3"><button className="flex-1 bg-indigo-50 text-indigo-600 py-4 rounded-[1.25rem] text-[10px] font-black uppercase tracking-widest group-hover:bg-indigo-600 group-hover:text-white transition-all">Open Session</button></div>
                 </div>
-              ) : (
-                filteredSets.map(set => (
-                  <div key={set.id} className="bg-white p-6 rounded-[2.5rem] border border-slate-200 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all cursor-pointer group" onClick={() => { setActiveSetId(set.id); setView(activeTab === 'flashcards' ? 'study' : 'quiz-ready'); setCurrentCardIndex(0); }}>
-                    <div className="flex justify-between items-start mb-2"><h3 className="text-xl font-black group-hover:text-indigo-600 leading-tight">{set.title}</h3><button onClick={(e) => { e.stopPropagation(); deleteSet(set.id); }} className="text-slate-100 hover:text-red-500 transition-colors"><Trash2 size={18}/></button></div>
-                    <div className="flex items-center gap-2 text-[10px] font-black uppercase text-slate-400 tracking-widest mt-1"><Play size={10} fill="currentColor"/> {set.items?.length || 0} ITEMS</div>
-                    <div className="mt-8 flex gap-3"><button className="flex-1 bg-indigo-50 text-indigo-600 py-4 rounded-[1.25rem] text-[10px] font-black uppercase tracking-widest hover:bg-indigo-600 hover:text-white transition-all">Launch</button></div>
-                  </div>
-                ))
-              )}
+              ))}
             </div>
           </div>
         )}
 
-        {/* EDITOR (With Large Reorder Buttons & Private Path Logic) */}
+        {/* EDITOR (Big Buttons) */}
         {view === 'edit' && activeSet && (
           <div className="animate-in fade-in duration-300 pb-20">
-            <div className="flex justify-between items-center mb-8 sticky top-20 bg-slate-50/90 backdrop-blur-sm py-4 z-40 border-b border-slate-200">
+            <div className="flex justify-between items-center mb-8 sticky top-16 bg-slate-50/90 py-4 z-40 border-b border-slate-200">
               <button onClick={() => setView('library')} className="text-slate-400 p-2"><ChevronLeft size={24}/></button>
-              <div className="flex gap-2"><button onClick={() => setIsImporting(true)} className="bg-white border border-slate-200 px-6 rounded-2xl text-[10px] font-black uppercase tracking-widest flex items-center gap-2 hover:bg-slate-50 shadow-sm"><Upload size={14}/> Bulk</button><button onClick={() => setView('library')} className="bg-indigo-600 text-white px-8 rounded-2xl text-[10px] font-black uppercase tracking-widest shadow-lg shadow-indigo-100 active:scale-95 transition-all">Save Changes</button></div>
+              <div className="flex gap-2"><button onClick={() => setIsImporting(true)} className="bg-white border border-slate-200 px-6 rounded-2xl text-[10px] font-black uppercase tracking-widest">Bulk</button><button onClick={() => setView('library')} className="bg-indigo-600 text-white px-8 rounded-2xl text-[10px] font-black uppercase tracking-widest shadow-lg">Done</button></div>
             </div>
-            <div className="bg-white p-10 rounded-[3.5rem] border border-slate-200 shadow-sm mb-10"><label className="text-[10px] font-black text-slate-300 uppercase block mb-3 tracking-widest">Title</label><input value={activeSet.title} onChange={e => updateSet(activeSetId, { title: e.target.value })} className="w-full text-4xl font-black outline-none border-b-4 border-slate-50 focus:border-indigo-500 transition-all pb-3" placeholder="Title..."/></div>
+            <input value={activeSet.title} onChange={e => updateSet(activeSetId, { title: e.target.value })} className="w-full text-4xl font-black outline-none border-b-4 border-slate-50 focus:border-indigo-500 transition-all pb-3 mb-10" placeholder="Set Title..."/>
             <div className="space-y-8">
               {(activeSet.items || []).map((item, i) => (
                 <div key={item.id} className="bg-white p-10 rounded-[3.5rem] border border-slate-200 shadow-sm relative group">
                   <div className="flex justify-between items-center mb-10">
                     <div className="flex items-center gap-4">
-                       <span className="bg-slate-100 text-slate-400 px-4 py-1.5 rounded-full text-[10px] font-black tracking-widest uppercase">{activeTab === 'flashcards' ? 'Card' : 'Question'} {i+1}</span>
-                       <div className="flex bg-slate-100 p-1 rounded-xl gap-1 border border-slate-200 ml-4">
-                          <button onClick={() => moveItem(i, -1)} disabled={i === 0} className={`p-2.5 rounded-xl transition-all ${i === 0 ? 'text-slate-200 opacity-50' : 'bg-white text-indigo-600 shadow-md hover:scale-110 active:scale-90'}`}><ChevronUp size={24} strokeWidth={3}/></button>
-                          <button onClick={() => moveItem(i, 1)} disabled={i === activeSet.items.length - 1} className={`p-2.5 rounded-xl transition-all ${i === activeSet.items.length - 1 ? 'text-slate-200 opacity-50' : 'bg-white text-indigo-600 shadow-md hover:scale-110 active:scale-90'}`}><ChevronDown size={24} strokeWidth={3}/></button>
+                       <span className="bg-slate-100 text-slate-400 px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest">Item {i+1}</span>
+                       <div className="flex bg-slate-100 p-1 rounded-xl gap-1 border border-slate-200">
+                          <button onClick={() => moveItem(i, -1)} disabled={i === 0} className={`p-2.5 rounded-xl transition-all ${i === 0 ? 'text-slate-200' : 'bg-white text-indigo-600 shadow-md hover:scale-110 active:scale-90'}`}><ChevronUp size={24} strokeWidth={3}/></button>
+                          <button onClick={() => moveItem(i, 1)} disabled={i === activeSet.items.length - 1} className={`p-2.5 rounded-xl transition-all ${i === activeSet.items.length - 1 ? 'text-slate-200' : 'bg-white text-indigo-600 shadow-md hover:scale-110 active:scale-90'}`}><ChevronDown size={24} strokeWidth={3}/></button>
                        </div>
                     </div>
                     <button onClick={() => updateSet(activeSetId, { items: activeSet.items.filter(it => it.id !== item.id) })} className="text-slate-100 hover:text-red-500 transition-colors p-2"><Trash2 size={24}/></button>
                   </div>
                   {activeTab === 'flashcards' ? (
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-12">
-                      <div><label className="text-[10px] font-black text-slate-300 uppercase mb-3 block tracking-widest">Term</label><input value={item.term} onChange={e => { const ni = [...activeSet.items]; ni[i].term = e.target.value; updateSet(activeSetId, { items: ni }); }} className="w-full font-black text-xl border-b-2 outline-none border-slate-50 focus:border-indigo-500 pb-2" /></div>
-                      <div><label className="text-[10px] font-black text-slate-300 uppercase mb-3 block tracking-widest">Explanation</label><textarea value={item.definition} onChange={e => { const ni = [...activeSet.items]; ni[i].definition = e.target.value; updateSet(activeSetId, { items: ni }); }} className="w-full font-medium border-b-2 outline-none border-slate-50 focus:border-indigo-500 resize-none h-12" /></div>
+                      <input value={item.term} onChange={e => { const ni = [...activeSet.items]; ni[i].term = e.target.value; updateSet(activeSetId, { items: ni }); }} className="w-full font-black text-xl border-b-2 outline-none border-slate-50 focus:border-indigo-500 pb-2" placeholder="Term" />
+                      <textarea value={item.definition} onChange={e => { const ni = [...activeSet.items]; ni[i].definition = e.target.value; updateSet(activeSetId, { items: ni }); }} className="w-full font-medium border-b-2 outline-none border-slate-50 focus:border-indigo-500 resize-none h-12" placeholder="Definition" />
                     </div>
                   ) : (
-                    <div className="space-y-10">
-                       <div><div className="flex justify-between items-center mb-6"><label className="text-[10px] font-black text-slate-300 uppercase tracking-widest">Question Text</label><div className="flex bg-slate-100 p-1.5 rounded-2xl shadow-inner"><button onClick={() => { const ni = [...activeSet.items]; ni[i].type = 'mc'; ni[i].options = {a:'',b:'',c:'',d:''}; updateSet(activeSetId, {items:ni}); }} className={`px-6 py-2 rounded-xl text-[10px] font-black transition-all ${item.type==='mc' ? 'bg-white shadow-md text-indigo-600':'text-slate-400'}`}>A/B/C/D</button><button onClick={() => { const ni = [...activeSet.items]; ni[i].type = 'tf'; ni[i].correctAnswer = 'true'; updateSet(activeSetId, {items:ni}); }} className={`px-6 py-2 rounded-xl text-[10px] font-black transition-all ${item.type==='tf' ? 'bg-white shadow-md text-indigo-600':'text-slate-400'}`}>T/F</button></div></div><textarea value={item.question} onChange={e => { const ni = [...activeSet.items]; ni[i].question = e.target.value; updateSet(activeSetId, { items: ni }); }} className="w-full text-2xl font-black border-b-2 border-slate-50 outline-none focus:border-indigo-500 resize-none h-24 p-2" /></div>
-                       {item.type === 'mc' ? (
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                            {['a', 'b', 'c', 'd'].map(key => (
-                              <div key={key} className="relative group pl-6">
-                                <div className={`absolute left-0 top-0 bottom-0 w-1.5 rounded-full ${item.correctAnswer === key ? 'bg-indigo-600':'bg-slate-100'}`} />
-                                <label className="text-[10px] font-black text-slate-300 uppercase mb-2 block flex justify-between items-center">Option {key.toUpperCase()}<button onClick={() => { const ni = [...activeSet.items]; ni[i].correctAnswer = key; updateSet(activeSetId, {items:ni}); }} className={`text-[9px] font-black py-1 px-3 rounded-lg transition-all ${item.correctAnswer === key ? 'bg-indigo-600 text-white shadow-md':'bg-slate-50 text-slate-300 hover:text-indigo-400'}`}>{item.correctAnswer === key ? '✓ CORRECT' : 'SET AS KEY'}</button></label>
-                                <input value={item.options[key]} onChange={e => { const ni = [...activeSet.items]; ni[i].options[key] = e.target.value; updateSet(activeSetId, { items: ni }); }} className={`w-full font-bold outline-none border-b-2 py-1 ${item.correctAnswer === key ? 'border-indigo-100 text-indigo-800':'border-slate-50 text-slate-500'}`} />
-                              </div>
-                            ))}
-                          </div>
-                       ) : (
-                          <div className="flex gap-4">
-                            <button onClick={() => { const ni = [...activeSet.items]; ni[i].correctAnswer = 'true'; updateSet(activeSetId, {items:ni}); }} className={`flex-1 py-6 rounded-[1.5rem] font-black text-sm uppercase tracking-widest border-2 transition-all ${item.correctAnswer === 'true' ? 'border-emerald-500 bg-emerald-50 text-emerald-700 shadow-inner' : 'border-slate-100 text-slate-300 hover:border-slate-200'}`}>Correct: TRUE</button>
-                            <button onClick={() => { const ni = [...activeSet.items]; ni[i].correctAnswer = 'false'; updateSet(activeSetId, {items:ni}); }} className={`flex-1 py-6 rounded-[1.5rem] font-black text-sm uppercase tracking-widest border-2 transition-all ${item.correctAnswer === 'false' ? 'border-rose-500 bg-rose-50 text-rose-700 shadow-inner' : 'border-slate-100 text-slate-300 hover:border-slate-200'}`}>Correct: FALSE</button>
-                          </div>
-                       )}
+                    <div className="space-y-6">
+                       <textarea value={item.question} onChange={e => { const ni = [...activeSet.items]; ni[i].question = e.target.value; updateSet(activeSetId, { items: ni }); }} className="w-full text-xl font-black border-b-2 border-slate-50 outline-none focus:border-indigo-500 resize-none h-20 p-2" placeholder="Enter Question" />
+                       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {['a', 'b', 'c', 'd'].map(key => (
+                            <div key={key} className="flex items-center gap-2">
+                               <button onClick={() => { const ni = [...activeSet.items]; ni[i].correctAnswer = key; updateSet(activeSetId, {items:ni}); }} className={`w-10 h-10 rounded-xl font-black uppercase ${item.correctAnswer === key ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-300'}`}>{key}</button>
+                               <input value={item.options[key]} onChange={e => { const ni = [...activeSet.items]; ni[i].options[key] = e.target.value; updateSet(activeSetId, { items: ni }); }} className="flex-1 font-bold outline-none border-b-2 border-slate-50 focus:border-indigo-500" placeholder={`Option ${key}`} />
+                            </div>
+                          ))}
+                       </div>
                     </div>
                   )}
                 </div>
               ))}
-              <button onClick={() => updateSet(activeSetId, { items: [...(activeSet.items || []), activeTab === 'flashcards' ? { id: Math.random().toString(), term: '', definition: '' } : { id: Math.random().toString(), type: 'mc', question: '', options: {a:'',b:'',c:'',d:''}, correctAnswer: 'a' }] })} className="w-full py-16 border-4 border-dashed border-slate-200 rounded-[4rem] text-slate-200 font-black hover:border-indigo-200 hover:text-indigo-500 transition-all text-2xl flex items-center justify-center gap-4 active:scale-98"><Plus size={32}/> ADD NEW ITEM</button>
+              <button onClick={() => updateSet(activeSetId, { items: [...(activeSet.items || []), activeTab === 'flashcards' ? { id: Math.random().toString(), term: '', definition: '' } : { id: Math.random().toString(), type: 'mc', question: '', options: {a:'',b:'',c:'',d:''}, correctAnswer: 'a' }] })} className="w-full py-16 border-4 border-dashed border-slate-200 rounded-[4rem] text-slate-200 font-black hover:border-indigo-200 hover:text-indigo-500 transition-all text-2xl flex items-center justify-center gap-4">+ NEW ITEM</button>
             </div>
           </div>
         )}
 
-        {/* Study Mode, Quiz Center, and Import Modal remain active... */}
+        {/* Study, Quiz, Ready and Import follow... */}
         {view === 'study' && activeSet && (
           <div className="max-w-2xl mx-auto text-center animate-in zoom-in-95 duration-300">
-            <div className="flex justify-between items-center mb-8"><button onClick={() => setView('library')} className="text-slate-400 font-black text-[10px] uppercase flex items-center gap-2 hover:text-indigo-600"><ChevronLeft size={16}/> Back</button><button onClick={() => setView('edit')} className="bg-indigo-600 text-white px-6 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg active:scale-95 transition-all">Edit Deck</button></div>
+            <div className="flex justify-between items-center mb-8"><button onClick={() => setView('library')} className="text-slate-400 font-black text-[10px] uppercase flex items-center gap-2 hover:text-indigo-600"><ChevronLeft size={16}/> Library</button><button onClick={() => setView('edit')} className="bg-indigo-600 text-white px-6 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg active:scale-95 transition-all">Edit Deck</button></div>
             <h1 className="text-2xl font-black text-slate-800 mb-2">{activeSet.title}</h1>
             <div className="bg-indigo-50 text-indigo-600 inline-block px-4 py-1.5 rounded-full text-[10px] font-black uppercase tracking-widest mb-10">{currentCardIndex + 1} / {activeSet.items?.length || 0}</div>
             <div className="aspect-[16/10] relative perspective-1000 cursor-pointer mb-12 select-none group" onClick={() => setIsFlipped(!isFlipped)}>
@@ -566,16 +531,16 @@ export default function App() {
         )}
       </main>
 
-      {/* Persistent Bottom Bar (Mobile First) */}
+      {/* Bottom Nav */}
       {user && (
-        <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 px-8 py-4 flex justify-around items-center z-50">
+        <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 px-8 py-4 flex justify-around items-center z-50 shadow-lg">
           <button onClick={() => setView('dashboard')} className={`flex flex-col items-center gap-1 ${view === 'dashboard' ? 'text-indigo-600' : 'text-slate-300'}`}>
             <Home size={24} />
             <span className="text-[9px] font-black uppercase tracking-widest">Home</span>
           </button>
           <button onClick={() => { setActiveTab('flashcards'); setView('library'); }} className={`flex flex-col items-center gap-1 ${view === 'library' && activeTab === 'flashcards' ? 'text-indigo-600' : 'text-slate-300'}`}>
             <LayoutGrid size={24} />
-            <span className="text-[9px] font-black uppercase tracking-widest">Cards</span>
+            <span className="text-[9px] font-black uppercase tracking-widest">Decks</span>
           </button>
           <button onClick={() => { setActiveTab('quizzes'); setView('library'); }} className={`flex flex-col items-center gap-1 ${view === 'library' && activeTab === 'quizzes' ? 'text-indigo-600' : 'text-slate-300'}`}>
             <GraduationCap size={24} />
